@@ -25,6 +25,7 @@ import (
 	"gopkg.in/yaml.v2"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -144,6 +145,24 @@ func (r *DexServerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		return ctrl.Result{Requeue: true}, nil
 
+	case isNotDefinedClusterRole(dexServer, r, ctx):
+		spec := r.defineClusterRole(dexServer)
+		log.Info("Creating a new ClusterRole", "ClusterRole.Name", SERVICE_ACCOUNT_NAME)
+		if err := r.Create(ctx, spec); err != nil {
+			log.Info("failed to create ClusterRole", "ClusterRole.Name", SERVICE_ACCOUNT_NAME)
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
+
+	case isNotDefinedClusterRoleBinding(dexServer, r, ctx):
+		spec := r.defineClusterRoleBinding(dexServer)
+		log.Info("Creating a new ClusterRoleBinding", "ClusterRoleBinding.Name", SERVICE_ACCOUNT_NAME)
+		if err := r.Create(ctx, spec); err != nil {
+			log.Info("failed to create ClusterRoleBinding", "ClusterRoleBinding.Name", SERVICE_ACCOUNT_NAME)
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
+
 	case isNotDefinedDeployment(dexServer, r, ctx):
 		spec := r.defineDeployment(dexServer)
 		log.Info("Creating a new Deployment", "Deployment.Namespace", spec.Namespace, "Deployment.Name", spec.Name)
@@ -195,6 +214,22 @@ func isNotDefinedServiceAccount(m *authv1alpha1.DexServer, r *DexServerReconcile
 		} else {
 			return true
 		}
+	}
+	return false
+}
+
+func isNotDefinedClusterRole(m *authv1alpha1.DexServer, r *DexServerReconciler, ctx context.Context) bool {
+	resource := &rbacv1.ClusterRole{}
+	if err := r.Get(ctx, types.NamespacedName{Name: SERVICE_ACCOUNT_NAME}, resource); err != nil {
+		return true
+	}
+	return false
+}
+
+func isNotDefinedClusterRoleBinding(m *authv1alpha1.DexServer, r *DexServerReconciler, ctx context.Context) bool {
+	resource := &rbacv1.ClusterRoleBinding{}
+	if err := r.Get(ctx, types.NamespacedName{Name: SERVICE_ACCOUNT_NAME}, resource); err != nil {
+		return true
 	}
 	return false
 }
@@ -281,6 +316,62 @@ func (r *DexServerReconciler) defineServiceAccount(m *authv1alpha1.DexServer) *c
 	}
 	ctrl.SetControllerReference(m, serviceAccountSpec, r.Scheme)
 	return serviceAccountSpec
+}
+
+func (r *DexServerReconciler) defineClusterRole(m *authv1alpha1.DexServer) *rbacv1.ClusterRole {
+	clusterRoleSpec := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: SERVICE_ACCOUNT_NAME,
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				Resources: []string{
+					"*",
+				},
+				Verbs: []string{
+					"*",
+				},
+				APIGroups: []string{
+					"dex.coreos.com",
+				},
+			},
+			{
+				Resources: []string{
+					"customresourcedefinitions",
+				},
+				Verbs: []string{
+					"create",
+				},
+				APIGroups: []string{
+					"apiextensions.k8s.io",
+				},
+			},
+		},
+	}
+	ctrl.SetControllerReference(m, clusterRoleSpec, r.Scheme)
+	return clusterRoleSpec
+}
+
+func (r *DexServerReconciler) defineClusterRoleBinding(m *authv1alpha1.DexServer) *rbacv1.ClusterRoleBinding {
+	clusterRoleBindingSpec := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: SERVICE_ACCOUNT_NAME,
+		},
+		RoleRef: rbacv1.RoleRef{
+			Kind:     "ClusterRole",
+			Name:     SERVICE_ACCOUNT_NAME,
+			APIGroup: "rbac.authorization.k8s.io",
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      SERVICE_ACCOUNT_NAME,
+				Namespace: m.Namespace,
+			},
+		},
+	}
+	ctrl.SetControllerReference(m, clusterRoleBindingSpec, r.Scheme)
+	return clusterRoleBindingSpec
 }
 
 // Defines the dex instance (dex server).
@@ -483,7 +574,7 @@ type DexGrpcSpec struct {
 	Reflection  bool   `yaml:"reflection,omitempty"`
 }
 
-// The DexConnectorConfigSpec is specific to the Github connector as of now 
+// The DexConnectorConfigSpec is specific to the Github connector as of now
 // TODO: Add config properties for ldap
 type DexConnectorConfigSpec struct {
 	ClientID     string `yaml:"clientID,omitempty"`
@@ -574,7 +665,7 @@ func (r *DexServerReconciler) defineConfigMap(m *authv1alpha1.DexServer, ctx con
 			Type: connectorType,
 			Id:   connector.Id,
 			Name: connector.Name,
-			Config: DexConnectorConfigSpec{	// This definition is specific to the Github connector (the ldap configuration has different attributes for config)
+			Config: DexConnectorConfigSpec{ // This definition is specific to the Github connector (the ldap configuration has different attributes for config)
 				ClientID:     connector.Config.ClientID,
 				ClientSecret: clientSecret,
 				RedirectURI:  connector.Config.RedirectURI,
